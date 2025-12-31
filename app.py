@@ -44,11 +44,19 @@ if not st.session_state.agent_initialized:
 with st.sidebar:
     st.header("ℹ️ About")
     st.markdown("""
-    This is an **Agentic Graph RAG** system that:
-    1. 🧠 Extracts entities from your question
-    2. 🔄 Generates a Cypher query
-    3. 📊 Queries the Neo4j graph database
-    4. 💬 Formats a natural language answer
+    This is an **Agentic Graph RAG** system using **Tool-Calling Architecture**:
+    
+    1. 🤖 AI agent analyzes your question
+    2. 🛠️ Agent decides when to call Neo4j query tool
+    3. 🔍 Tool generates and executes Cypher queries
+    4. 📊 Agent receives JSON results
+    5. 💬 Agent formulates natural language answer
+    
+    **Key Features:**
+    - No Cypher generation in prompts
+    - Agent has full control over queries
+    - Tools return structured JSON data
+    - More reliable and maintainable
     """)
     
     st.header("📝 Example Questions")
@@ -117,25 +125,24 @@ if submit_button:
                     # Create two columns for additional details
                     col1, col2 = st.columns(2)
                     
-                    # Left column: Show extracted entities
+                    # Left column: Show tool calls
                     with col1:
-                        with st.expander("🏷️ Extracted Entities", expanded=False):
-                            if result.get("entities"):
-                                # Display entities in a nice format
-                                for entity in result["entities"]:
-                                    st.markdown(f"- **{entity['name']}** ({entity['type']})")
+                        with st.expander("🛠️ Tool Calls Made", expanded=False):
+                            if result.get("tool_calls"):
+                                for i, call in enumerate(result["tool_calls"], 1):
+                                    st.markdown(f"**Call {i}:** {call['function']}")
+                                    st.code(call['query'], language="cypher")
+                                    st.info(f"✓ Retrieved {call['count']} results")
                             else:
-                                st.info("No specific entities extracted")
-                            
-                            # Show query intent if available
-                            if result.get("query_intent"):
-                                st.markdown(f"\n**Intent:** {result['query_intent']}")
+                                st.info("No tool calls were needed for this question")
                     
-                    # Right column: Show Cypher query
+                    # Right column: Show generated Cypher query
                     with col2:
-                        with st.expander("🔍 Generated Cypher Query", expanded=False):
-                            # Display the Cypher query with syntax highlighting
-                            st.code(result["cypher_query"], language="cypher")
+                        with st.expander("🔍 Cypher Query", expanded=False):
+                            if result.get("cypher_query"):
+                                st.code(result["cypher_query"], language="cypher")
+                            else:
+                                st.info("No Cypher query was generated")
                     
                     # Full-width section: Show raw results
                     with st.expander("📊 Raw Neo4j Results", expanded=False):
@@ -168,7 +175,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: gray;'>
-        Built with Streamlit, Neo4j Aura, and Groq LLM
+        Built with Tool-Calling Architecture | Streamlit • Neo4j Aura • Groq LLM
     </div>
     """,
     unsafe_allow_html=True

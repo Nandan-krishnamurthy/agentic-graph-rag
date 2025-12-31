@@ -2,7 +2,7 @@
 Graph RAG Agent Module
 
 Main orchestration module for the Agentic Graph RAG system.
-Coordinates entity extraction, Cypher generation, Neo4j queries, and answer formatting.
+Uses tool-calling approach where AI agent decides when to query Neo4j.
 """
 
 import os
@@ -10,23 +10,26 @@ from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
-from agent.entity_extractor import EntityExtractor
-from agent.cypher_generator import CypherGenerator
-from agent.answer_formatter import AnswerFormatter
+from agent.neo4j_tool import Neo4jQueryTool
+from agent.tool_calling_agent import ToolCallingAgent
 
 
 class GraphRAGAgent:
     """
     Agentic Graph RAG (Retrieval-Augmented Generation) System.
     
-    This agent orchestrates the complete pipeline from natural language
-    question to human-readable answer using a Neo4j graph database.
+    Uses a tool-calling approach where the AI agent decides when to query
+    the Neo4j database using a callable tool.
     
-    Pipeline:
-    1. Extract entities from user question
-    2. Generate Cypher query based on entities and question
-    3. Execute query against Neo4j database
-    4. Format raw results into natural language answer
+    Architecture:
+    1. User asks a question
+    2. AI agent decides if it needs to query the database
+    3. Agent generates Cypher query through tool calling
+    4. Tool executes query and returns JSON results
+    5. Agent formulates natural language answer from results
+    
+    This approach eliminates Cypher generation in prompts and gives the
+    agent more control over the query process.
     """
     
     def __init__(
@@ -38,14 +41,14 @@ class GraphRAGAgent:
         model: str = "llama-3.3-70b-versatile"
     ):
         """
-        Initialize the Graph RAG Agent.
+        Initialize the Graph RAG Agent with tool-calling architecture.
         
         Args:
             neo4j_uri: Neo4j connection URI (defaults to NEO4J_URI env var)
             neo4j_user: Neo4j username (defaults to NEO4J_USER env var)
             neo4j_password: Neo4j password (defaults to NEO4J_PASSWORD env var)
             groq_api_key: Groq API key (defaults to GROQ_API_KEY env var)
-            model: LLM model to use for entity extraction and answer generation
+            model: LLM model to use for the agent
         """
         # Load environment variables
         load_dotenv()
@@ -61,12 +64,17 @@ class GraphRAGAgent:
         # Initialize Neo4j driver - SSL is auto-configured with neo4j+s:// URI
         self.driver = GraphDatabase.driver(uri, auth=(username, password))
         
-        # Initialize AI components
-        self.entity_extractor = EntityExtractor(api_key=groq_api_key, model=model)
-        self.cypher_generator = CypherGenerator(api_key=groq_api_key, model=model)
-        self.answer_formatter = AnswerFormatter(api_key=groq_api_key, model=model)
+        # Initialize the Neo4j query tool
+        self.neo4j_tool = Neo4jQueryTool(self.driver)
         
-        print("✓ Graph RAG Agent initialized successfully")
+        # Initialize the tool-calling agent
+        self.agent = ToolCallingAgent(
+            neo4j_tool=self.neo4j_tool,
+            api_key=groq_api_key,
+            model=model
+        )
+        
+        print("✓ Graph RAG Agent initialized successfully with tool-calling architecture")
     
     def close(self):
         """Close the Neo4j connection."""
@@ -75,13 +83,13 @@ class GraphRAGAgent:
     
     def ask(self, question: str, verbose: bool = False) -> Dict[str, Any]:
         """
-        Main method to ask a question and get an answer.
+        Main method to ask a question and get an answer using tool-calling.
         
-        This method orchestrates the entire RAG pipeline:
-        1. Extract entities from the question
-        2. Generate a Cypher query
-        3. Execute the query on Neo4j
-        4. Format the results into a natural language answer
+        The agent will:
+        1. Analyze the question
+        2. Decide if it needs to query the database
+        3. Generate and execute Cypher queries via tool calling
+        4. Formulate a natural language answer
         
         Args:
             question: User's natural language question
@@ -90,10 +98,9 @@ class GraphRAGAgent:
         Returns:
             Dictionary containing:
                 - question: Original question
-                - entities: Extracted entities
-                - cypher_query: Generated Cypher query
-                - raw_results: Raw Neo4j query results
-                - answer: Formatted natural language answer
+                - answer: Natural language answer
+                - tool_calls: List of tool calls made (with queries and results)
+                - raw_results: Combined results from all tool calls
                 - success: Boolean indicating if the pipeline succeeded
                 - error: Error message if pipeline failed
                 
@@ -109,81 +116,20 @@ class GraphRAGAgent:
             print(f"{'='*80}")
         
         try:
-            # Step 1: Extract entities from the question
-            if verbose:
-                print("\n[Step 1] Extracting entities...")
+            # Use the tool-calling agent to process the question
+            result = self.agent.ask(question, verbose=verbose)
             
-            extraction_result = self.entity_extractor.extract(question)
-            entities = extraction_result.get("entities", [])
-            query_intent = extraction_result.get("query_intent", "")
-            
-            if verbose:
-                print(f"  Intent: {query_intent}")
-                print(f"  Entities: {entities}")
-            
-            # Step 2: Generate Cypher query
-            if verbose:
-                print("\n[Step 2] Generating Cypher query...")
-            
-            cypher_result = self.cypher_generator.generate_with_validation(
-                question=question,
-                entities=entities
-            )
-            
-            cypher_query = cypher_result["query"]
-            
-            if not cypher_result["valid"]:
-                error_msg = f"Invalid Cypher query: {cypher_result['error']}"
-                if verbose:
-                    print(f"  ERROR: {error_msg}")
-                return {
-                    "question": question,
-                    "entities": entities,
-                    "cypher_query": cypher_query,
-                    "raw_results": [],
-                    "answer": "I couldn't generate a valid query for your question.",
-                    "success": False,
-                    "error": error_msg
-                }
-            
-            if verbose:
-                print(f"  Query: {cypher_query}")
-            
-            # Step 3: Execute query on Neo4j
-            if verbose:
-                print("\n[Step 3] Executing query on Neo4j...")
-            
-            raw_results = self._execute_query(cypher_query)
-            
-            if verbose:
-                print(f"  Retrieved {len(raw_results)} results")
-                if raw_results and len(raw_results) <= 3:
-                    print(f"  Sample: {raw_results[:3]}")
-            
-            # Step 4: Format answer
-            if verbose:
-                print("\n[Step 4] Formatting answer...")
-            
-            answer = self.answer_formatter.format_answer(
-                question=question,
-                cypher_query=cypher_query,
-                results=raw_results
-            )
-            
-            if verbose:
-                print(f"\n{'='*80}")
-                print(f"Answer: {answer}")
-                print(f"{'='*80}\n")
-            
+            # Extract relevant information for backward compatibility
             return {
                 "question": question,
-                "entities": entities,
-                "query_intent": query_intent,
-                "cypher_query": cypher_query,
-                "raw_results": raw_results,
-                "answer": answer,
-                "success": True,
-                "error": None
+                "answer": result["answer"],
+                "tool_calls": result.get("tool_calls", []),
+                "raw_results": result.get("results", []),
+                "cypher_query": result["tool_calls"][0]["query"] if result.get("tool_calls") else "",
+                "entities": [],  # Not extracted separately in tool-calling approach
+                "query_intent": "",  # Not extracted separately in tool-calling approach
+                "success": result["success"],
+                "error": result.get("error")
             }
             
         except Exception as e:
@@ -193,10 +139,12 @@ class GraphRAGAgent:
             
             return {
                 "question": question,
-                "entities": [],
-                "cypher_query": "",
-                "raw_results": [],
                 "answer": f"I encountered an error processing your question: {str(e)}",
+                "tool_calls": [],
+                "raw_results": [],
+                "cypher_query": "",
+                "entities": [],
+                "query_intent": "",
                 "success": False,
                 "error": error_msg
             }
@@ -274,20 +222,6 @@ class GraphRAGAgent:
         except Exception as e:
             print(f"Connection test failed: {e}")
             return False
-    
-    def _execute_query(self, cypher_query: str) -> List[Dict[str, Any]]:
-        """
-        Execute a Cypher query and return results as a list of dictionaries.
-        
-        Args:
-            cypher_query: The Cypher query to execute
-            
-        Returns:
-            List of result dictionaries
-        """
-        with self.driver.session() as session:
-            result = session.run(cypher_query)
-            return [dict(record) for record in result]
 
 
 def main():
